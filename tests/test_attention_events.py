@@ -392,9 +392,11 @@ def test_daemon_priority_repeat_full_and_chunking(isolated_env):
     assert completion and permission
     registry.record_attention(completion)
     daemon.speak("SID-A")
+    daemon.wait_idle()
     first_call_count = len(synth.calls)
     registry.record_attention(permission)
     daemon.speak("SID-B")
+    daemon.wait_idle()
 
     permission_calls = synth.calls[first_call_count:]
     assert any("requests permission" in call for call in permission_calls)
@@ -413,6 +415,7 @@ def test_daemon_priority_repeat_full_and_chunking(isolated_env):
     registry.record_attention(lower)
     before_lower_count = len(synth.calls)
     daemon.speak("SID-A")
+    daemon.wait_idle()
     assert len(synth.calls) == before_lower_count
 
     question = normalize_attention_event(
@@ -429,13 +432,16 @@ def test_daemon_priority_repeat_full_and_chunking(isolated_env):
     assert question
     registry.record_attention(question)
     daemon.speak("SID-A")
+    daemon.wait_idle()
     assert any("Which option" in call for call in synth.calls[before_lower_count:])
 
     daemon.repeat()
+    daemon.wait_idle()
     repeat_calls = synth.calls[before_lower_count:]
     assert repeat_calls
     assert "Which option" in " ".join(repeat_calls)
     daemon.full()
+    daemon.wait_idle()
     assert "Which option" in " ".join(synth.calls)
 
 

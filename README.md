@@ -147,8 +147,10 @@ speed to Kokoro. Kokoro converts the text into phonemes and produces one or more
 audio arrays. Aloud joins those arrays with NumPy, writes a 24 kHz WAV file with
 `soundfile`, then asks macOS `afplay` to play it.
 
-Aloud splits long responses near sentence boundaries. For short responses, it
-uses a hash of the spoken text to reuse the last WAV file when possible.
+Aloud splits long responses near sentence boundaries. Playback starts as soon as
+the first chunk is ready; the next chunk is synthesized while the previous one
+plays, so there is no gap, and a stop or a higher-priority alert takes effect at
+once. A hash of the spoken text lets a repeat reuse the last WAV files.
 
 The default speech settings are:
 
@@ -159,9 +161,9 @@ The default speech settings are:
 | Sample rate | `24000` Hz |
 | Spoken gist | About `240` characters |
 | Synthesis chunk | Up to `1400` characters |
+| Reply speech | `gist` (or `paragraph`, `full`) |
 
 Available voice shortcuts include `af_heart`, `af_bella`, `am_michael`, and
-| Reply speech | `gist` (or `paragraph`, `full`) |
 `am_puck`.
 
 ### Local speech and first-run downloads

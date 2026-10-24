@@ -8,7 +8,8 @@ import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 from aloud.config import Config, load_config
 from aloud.paths import AppPaths, default_paths
@@ -21,7 +22,7 @@ class Synthesizer(Protocol):
 
 
 class Player(Protocol):
-    def play(self, path: os.PathLike[str] | str) -> None: ...
+    def play(self, path: os.PathLike[str] | str) -> Any: ...
 
     def stop(self) -> None: ...
 
@@ -60,8 +61,9 @@ class AfplayPlayer:
     def __init__(self) -> None:
         self._process: subprocess.Popen[bytes] | None = None
 
-    def play(self, path: os.PathLike[str] | str) -> None:
+    def play(self, path: os.PathLike[str] | str) -> subprocess.Popen[bytes]:
         self._process = subprocess.Popen(["afplay", os.fspath(path)])
+        return self._process
 
     def stop(self) -> None:
         subprocess.run(
@@ -72,9 +74,13 @@ class AfplayPlayer:
         )
         self._process = None
 
-    def wait(self) -> None:
-        if self._process is not None:
-            self._process.wait()
+    def wait(self, process: subprocess.Popen[bytes] | None = None) -> None:
+        """Block until `process` (or the current playback) has ended, however it ended."""
+        target = process or self._process
+        if target is None:
+            return
+        target.wait()
+        if self._process is target:
             self._process = None
 
     def is_playing(self) -> bool:
@@ -82,6 +88,13 @@ class AfplayPlayer:
 
 
 class Daemon:
+    """Turns registry entries into speech, one utterance at a time.
+
+    Long texts are split into chunks: the first one is synthesised and started right away,
+    the rest are synthesised on a worker thread while the previous chunk plays, so playback
+    has no gaps and the command loop stays free to stop or replace it at any moment.
+    """
+
     def __init__(
         self,
         paths: AppPaths | None = None,
@@ -96,6 +109,9 @@ class Daemon:
         self.synthesizer = synthesizer or KokoroSynthesizer(self.config)
         self.player = player or AfplayPlayer()
         self.current_priority: int | None = None
+        self._generation = 0
+        self._worker: threading.Thread | None = None
+        self._synth_lock = threading.Lock()
 
     def handle(self, command: str) -> None:
         parts = command.strip().split(maxsplit=1)
@@ -110,7 +126,7 @@ class Daemon:
         elif verb == "repeat":
             self.repeat()
         elif verb == "stop":
-            self.player.stop()
+            self.stop_playback()
             self.current_priority = None
         elif verb == "forget":
             self.forget()
@@ -137,11 +153,31 @@ class Daemon:
         )
 
     def forget(self) -> None:
-        self.player.stop()
+        self.stop_playback()
         self.current_priority = None
-        for path in (self.paths.wav, self.paths.signature):
-            with suppress(OSError):
+        with suppress(OSError):
+            for path in self.paths.cache_home.glob("last*.wav"):
                 path.unlink()
+            self.paths.signature.unlink()
+
+    def stop_playback(self) -> None:
+        """Cancel the chunk worker, if any, and silence the player."""
+        self._generation += 1
+        self.player.stop()
+
+    def is_busy(self) -> bool:
+        """True while a chunk worker is alive or the player reports sound."""
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            return True
+        is_playing = getattr(self.player, "is_playing", None)
+        return bool(is_playing()) if callable(is_playing) else False
+
+    def wait_idle(self) -> None:
+        """Block until the chunk worker has finished; for tests and the self-test."""
+        worker = self._worker
+        if worker is not None:
+            worker.join()
 
     def poll_transcripts(self) -> None:
         for session_id in self.registry.record_armed_transcript_events():
@@ -151,39 +187,70 @@ class Daemon:
     def _play_text(self, text: str, quiet: bool = False, priority: int = 4) -> None:
         if not self._should_play(priority):
             return
-        self.player.stop()
+        self.stop_playback()
         self.current_priority = priority
         if not text:
             if not quiet:
                 notify("No reply to read yet.")
             return
         chunks = speech_chunks(text, self.config.max_chars)
-        if len(chunks) > 1:
-            self._play_chunks(chunks)
-            return
+        outputs = [self._chunk_path(index) for index in range(len(chunks))]
         sig = signature(text)
-        cached = self.paths.wav.exists() and self._read_signature() == sig
+        cached = self._read_signature() == sig and all(path.exists() for path in outputs)
         if not cached:
-            if not self.synthesizer.synthesize(text, self.paths.wav):
+            self._clear_signature()
+            if not self._synthesize(chunks[0], outputs[0]):
                 return
-            self.paths.signature.parent.mkdir(parents=True, exist_ok=True)
-            self.paths.signature.write_text(sig)
-        self.player.play(self.paths.wav)
+        process = self.player.play(outputs[0])
+        if len(chunks) == 1:
+            if not cached:
+                self._write_signature(sig)
+            return
+        self._worker = threading.Thread(
+            target=self._continue,
+            args=(chunks, outputs, cached, sig, self._generation, process),
+            daemon=True,
+        )
+        self._worker.start()
 
-    def _play_chunks(self, chunks: list[str]) -> None:
-        for index, chunk in enumerate(chunks, 1):
-            out = self.paths.cache_home / f"last-{index}.wav"
-            if not self.synthesizer.synthesize(chunk, out):
+    def _continue(
+        self,
+        chunks: list[str],
+        outputs: list[Path],
+        cached: bool,
+        sig: str,
+        generation: int,
+        process: Any,
+    ) -> None:
+        previous = process
+        for chunk, out in zip(chunks[1:], outputs[1:], strict=True):
+            if generation != self._generation:
                 return
-            self.player.play(out)
-            wait = getattr(self.player, "wait", None)
-            if callable(wait):
-                wait()
+            if not cached and not self._synthesize(chunk, out):
+                return
+            self._wait_for(previous)
+            if generation != self._generation:
+                return
+            previous = self.player.play(out)
+        if not cached:
+            self._write_signature(sig)
+
+    def _synthesize(self, text: str, out: Path) -> bool:
+        with self._synth_lock:
+            return self.synthesizer.synthesize(text, out)
+
+    def _wait_for(self, process: Any) -> None:
+        wait = getattr(self.player, "wait", None)
+        if callable(wait):
+            wait(process)
+
+    def _chunk_path(self, index: int) -> Path:
+        if index == 0:
+            return self.paths.wav
+        return self.paths.cache_home / f"last-{index + 1}.wav"
 
     def _should_play(self, priority: int) -> bool:
-        is_playing = getattr(self.player, "is_playing", None)
-        active = bool(is_playing()) if callable(is_playing) else False
-        if not active or self.current_priority is None:
+        if not self.is_busy() or self.current_priority is None:
             return True
         return priority <= self.current_priority
 
@@ -192,6 +259,14 @@ class Daemon:
             return self.paths.signature.read_text().strip()
         except OSError:
             return None
+
+    def _write_signature(self, sig: str) -> None:
+        self.paths.signature.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.signature.write_text(sig)
+
+    def _clear_signature(self) -> None:
+        with suppress(OSError):
+            self.paths.signature.unlink()
 
 
 def notify(message: str) -> None:

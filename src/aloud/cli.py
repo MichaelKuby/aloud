@@ -247,6 +247,7 @@ def cmd_attention_self_test(args: argparse.Namespace) -> int:
         session_id = registry.record_attention(event)
         if session_id:
             daemon.speak(session_id)
+            daemon.wait_idle()
             return True
         return False
 
