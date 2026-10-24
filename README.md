@@ -118,6 +118,13 @@ The priority order is:
 
 A higher-priority event can interrupt a lower-priority message.
 
+`reply_speech` in `config.json` decides how much of a finished reply is spoken.
+`gist` (the default) speaks a short summary, or only the closing question when
+the reply ends with one. `paragraph` speaks the first paragraph, then the closing
+question if there is one. `full` speaks the whole reply. A reply that is only a
+question is spoken as a question in every mode, and the full reading always
+covers the whole reply.
+
 ### 3. Hooks send a session ID
 
 Hooks save the prepared text in the local session registry. They send a short
@@ -154,6 +161,7 @@ The default speech settings are:
 | Synthesis chunk | Up to `1400` characters |
 
 Available voice shortcuts include `af_heart`, `af_bella`, `am_michael`, and
+| Reply speech | `gist` (or `paragraph`, `full`) |
 `am_puck`.
 
 ### Local speech and first-run downloads
@@ -183,7 +191,8 @@ attention events before storage and speech. The redactor covers common formats;
 review sensitive output before enabling speech.
 
 By default, Aloud keeps up to 40 session records for two days. Edit
-`config.json` to change the voice, speed, chunk sizes, or retention limits.
+`config.json` to change the voice, speed, chunk sizes, reply speech, or
+retention limits.
 
 ## Check the installation
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aloud.attention import normalize_attention_event, summarize_completion
-from aloud.config import Config
+import pytest
+
+from aloud.attention import first_paragraph, normalize_attention_event, summarize_completion
+from aloud.config import Config, load_config
 from aloud.daemon import Daemon
 from aloud.hooks import event_hook, prompt_hook
 from aloud.registry import Registry
@@ -568,3 +570,132 @@ The migration finished and the tests passed.
     assert first == second
     assert first.startswith("The migration finished")
     assert len(first) <= 150
+
+
+QUESTION_REPLY = (
+    "I compared both migration paths. The incremental path keeps the service up and "
+    "needs one extra deploy. The big-bang path is simpler but blocks writes for an hour. "
+    "Which path should I take?"
+)
+MARKDOWN_REPLY = """**What changed**
+
+I compared both migration paths and wrote up the trade-offs.
+The incremental path keeps the service up.
+
+- Added hook coverage.
+- Preserved existing controls.
+
+Which path should I take?
+"""
+PARAGRAPH_MODE = Config(reply_speech="paragraph")
+FULL_MODE = Config(reply_speech="full")
+
+
+def _reply_payload(text: str, **extra: str) -> dict:
+    return {
+        "source": "Claude",
+        "hook_event_name": "Stop",
+        "session_id": "SID-Q",
+        "cwd": "/repo/aloud",
+        "last_assistant_message": text,
+        **extra,
+    }
+
+
+def test_first_paragraph_skips_labels_headings_code_and_tables():
+    assert first_paragraph(MARKDOWN_REPLY) == (
+        "I compared both migration paths and wrote up the trade-offs.\n"
+        "The incremental path keeps the service up."
+    )
+    noisy = "## Outcome\n\n```python\nx = 1\n```\n\n| a | b |\n| - | - |\n\nThe tests pass."
+    assert first_paragraph(noisy) == "The tests pass."
+    assert first_paragraph("- First bullet.\n- Second bullet.") == "First bullet.\nSecond bullet."
+    assert first_paragraph("Done.") == "Done."
+    assert first_paragraph("Outcome") == "Outcome"
+
+
+def test_gist_mode_keeps_upstream_speech_and_stores_the_whole_reply():
+    event = normalize_attention_event(_reply_payload(QUESTION_REPLY))
+
+    assert event
+    assert event.kind == "question"
+    assert event.speech_text == "Claude aloud asks: Which path should I take?"
+    assert event.full_text == QUESTION_REPLY
+
+
+def test_paragraph_mode_speaks_first_paragraph_then_the_question():
+    event = normalize_attention_event(_reply_payload(MARKDOWN_REPLY), PARAGRAPH_MODE)
+
+    assert event
+    assert (event.kind, event.priority) == ("question", 1)
+    assert event.speech_text == (
+        "Claude aloud completed. I compared both migration paths and wrote up the trade-offs.\n"
+        "The incremental path keeps the service up. Which path should I take?"
+    )
+    assert "Added hook coverage" in event.full_text
+    assert event.full_text.endswith("Which path should I take?")
+    assert event.questions == ("Which path should I take?",)
+
+
+def test_paragraph_mode_without_a_question_is_a_completion():
+    text = "Outcome\n\nThe migration finished and the tests passed.\n\nDetail that is not spoken."
+    event = normalize_attention_event(_reply_payload(text), PARAGRAPH_MODE)
+
+    assert event
+    assert (event.kind, event.priority) == ("completion", 4)
+    assert (
+        event.speech_text == "Claude aloud completed. The migration finished and the tests passed."
+    )
+
+
+def test_full_mode_speaks_the_whole_reply_and_keeps_question_priority():
+    asked = normalize_attention_event(_reply_payload(QUESTION_REPLY), FULL_MODE)
+    plain = normalize_attention_event(_reply_payload("Work finished. Tests pass."), FULL_MODE)
+
+    assert asked and plain
+    assert (asked.kind, asked.priority) == ("question", 1)
+    assert asked.speech_text == "Claude aloud completed. " + QUESTION_REPLY
+    assert asked.full_text == QUESTION_REPLY
+    assert (plain.kind, plain.priority) == ("completion", 4)
+    assert plain.speech_text == "Claude aloud completed. Work finished. Tests pass."
+
+
+@pytest.mark.parametrize(
+    "config", [Config(), PARAGRAPH_MODE, FULL_MODE, Config(reply_speech="banana")]
+)
+def test_a_bare_question_is_spoken_as_a_question_in_every_mode(config):
+    event = normalize_attention_event(_reply_payload("Which path should I take?"), config)
+
+    assert event
+    assert event.speech_text == "Claude aloud asks: Which path should I take?"
+    assert event.full_text == "Which path should I take?"
+
+
+def test_unknown_reply_speech_value_behaves_like_gist():
+    event = normalize_attention_event(_reply_payload(QUESTION_REPLY), Config(reply_speech="banana"))
+
+    assert event
+    assert event.speech_text == "Claude aloud asks: Which path should I take?"
+
+
+def test_reply_events_dedupe_across_modes_and_hook_or_transcript_shapes():
+    by_mode = [
+        normalize_attention_event(_reply_payload(QUESTION_REPLY), config)
+        for config in (Config(), PARAGRAPH_MODE, FULL_MODE)
+    ]
+    from_transcript = normalize_attention_event(
+        _reply_payload(QUESTION_REPLY, transcript_path="/repo/.claude/t.jsonl", turn_id=""),
+        FULL_MODE,
+    )
+
+    assert all(by_mode) and from_transcript
+    assert {event.dedupe_key for event in by_mode} == {from_transcript.dedupe_key}
+
+
+def test_config_reads_reply_speech(isolated_env):
+    isolated_env.app_home.mkdir(parents=True, exist_ok=True)
+    isolated_env.config.write_text('{"reply_speech": "full", "max_chars": 320}\n')
+
+    config = load_config(isolated_env)
+
+    assert (config.reply_speech, config.max_chars) == ("full", 320)

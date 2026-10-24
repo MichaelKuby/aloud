@@ -17,6 +17,12 @@ PRIORITY = {
     "completion": 4,
 }
 
+CONTEXT_REPLY_MODES = {"paragraph", "full"}
+HEADING_RE = re.compile(r"^\s{0,3}#")
+FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+SENTENCE_END = (".", "!", "?")
+
 QUESTION_TOOLS = {"AskUserQuestion", "request_user_input"}
 PLAN_TOOLS = {"ExitPlanMode"}
 PERMISSION_EVENTS = {"PermissionRequest", "Elicitation", "elicitation"}
@@ -100,7 +106,11 @@ def normalize_attention_event(
     if completion_text:
         ordinary_question = _plain_text_question(completion_text)
         if ordinary_question:
-            return _plain_question_event(payload, ordinary_question)
+            if config.reply_speech in CONTEXT_REPLY_MODES and _has_more_than(
+                completion_text, ordinary_question
+            ):
+                return _completion_event(payload, completion_text, config, ordinary_question)
+            return _plain_question_event(payload, ordinary_question, completion_text)
         if event_name in COMPLETION_EVENTS or payload.get("last_assistant_message"):
             return _completion_event(payload, completion_text, config)
 
@@ -111,6 +121,7 @@ def normalize_attention_event(
             return _plain_question_event(
                 {**payload, "last_assistant_message": notification},
                 ordinary_question,
+                notification,
             )
         return _blocked_event({**payload, "message": notification})
 
@@ -175,7 +186,11 @@ def _question_event(payload: dict[str, Any], tool_name: str) -> AttentionEvent |
     )
 
 
-def _plain_question_event(payload: dict[str, Any], question: str) -> AttentionEvent | None:
+def _plain_question_event(
+    payload: dict[str, Any],
+    question: str,
+    full_text: str,
+) -> AttentionEvent | None:
     source = _source(payload)
     session_id = _session_id(payload)
     if not session_id:
@@ -188,10 +203,48 @@ def _plain_question_event(payload: dict[str, Any], question: str) -> AttentionEv
         session_id,
         project,
         speech,
-        question,
+        full_text,
         payload,
         questions=(question,),
+        dedupe_text=question,
     )
+
+
+def first_paragraph(text: str) -> str:
+    """The first prose block of a reply, cleaned for speech; the whole reply if there is none.
+
+    Blank lines separate blocks. Fenced code and table rows are dropped, and a block that is
+    a heading or a short label without sentence punctuation, such as "Outcome" or
+    "**What changed**", is skipped.
+    """
+    stripped = TABLE_ROW_RE.sub("", FENCE_RE.sub("", text or ""))
+    for block in re.split(r"\n\s*\n", stripped):
+        candidate = block.strip()
+        if not candidate or HEADING_RE.match(candidate):
+            continue
+        spoken = to_speech(candidate, 0)
+        if not spoken or (len(spoken) <= 40 and not spoken.endswith(SENTENCE_END)):
+            continue
+        return spoken
+    return to_speech(text, 0)
+
+
+def _reply_speech(text: str, question: str, config: Config) -> str:
+    """What a finished reply says, per `reply_speech`: its gist, first paragraph, or all of it."""
+    if config.reply_speech == "full":
+        return to_speech(text, 0)
+    if config.reply_speech == "paragraph":
+        paragraph = first_paragraph(text)
+        if question and question not in paragraph:
+            return f"{paragraph} {question}".strip()
+        return paragraph
+    return summarize_completion(text, config)
+
+
+def _has_more_than(text: str, question: str) -> bool:
+    """True when the cleaned text says at least three words beyond the question."""
+    remainder = to_speech(text, 0).replace(question, " ")
+    return len(remainder.split()) >= 3
 
 
 def _plan_event(payload: dict[str, Any]) -> AttentionEvent | None:
@@ -252,6 +305,7 @@ def _completion_event(
     payload: dict[str, Any],
     text: str,
     config: Config,
+    question: str = "",
 ) -> AttentionEvent | None:
     source = _source(payload)
     session_id = _session_id(payload)
@@ -259,8 +313,20 @@ def _completion_event(
         return None
     project = _project(payload)
     full = redacted(to_speech(text, 0))
-    summary = redacted(summarize_completion(text, config))
-    speech = _identity(source, project) + " completed. " + summary
+    spoken = redacted(_reply_speech(text, question, config))
+    speech = _identity(source, project) + " completed. " + spoken
+    if question:
+        return _event(
+            "question",
+            source,
+            session_id,
+            project,
+            speech,
+            full,
+            payload,
+            questions=(question,),
+            dedupe_text=question,
+        )
     return _event(
         "completion",
         source,
@@ -285,13 +351,15 @@ def _event(
     questions: tuple[str, ...] = (),
     options: tuple[Option, ...] = (),
     requires_response: bool = True,
+    dedupe_text: str | None = None,
 ) -> AttentionEvent:
     speech = redacted(to_speech(speech, 0))
     full = redacted(to_speech(full, 0))
+    dedupe_full = full if dedupe_text is None else redacted(to_speech(dedupe_text, 0))
     dedupe_source = {
         "kind": kind,
         "session": session_id,
-        "full": full,
+        "full": dedupe_full,
         "questions": questions,
         "options": [option.__dict__ for option in options],
         "turn": payload.get("turn_id") or payload.get("request_id") or "",

@@ -15,6 +15,7 @@ class Config:
     gist_chars: int = 240
     keep_sessions: int = 40
     max_age_seconds: int = 2 * 24 * 3600
+    reply_speech: str = "gist"
 
 
 def load_config(paths: AppPaths) -> Config:
