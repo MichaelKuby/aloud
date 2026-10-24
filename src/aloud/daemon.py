@@ -14,7 +14,7 @@ from typing import Any, Protocol
 from aloud.config import Config, load_config
 from aloud.paths import AppPaths, default_paths
 from aloud.registry import Registry
-from aloud.text import signature, speech_chunks, to_gist
+from aloud.text import signature, speech_chunks, spoken_form, to_gist
 
 
 class Synthesizer(Protocol):
@@ -44,7 +44,7 @@ class KokoroSynthesizer:
         chunks = [
             audio
             for _, _, audio in self._pipeline(
-                text,
+                spoken_form(text),
                 voice=self.config.voice,
                 speed=self.config.speed,
             )

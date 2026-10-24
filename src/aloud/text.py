@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import re
 
+SENTENCE_END_RE = re.compile(r"[.!?]+(?=\s)")
+FILE_DOT_RE = re.compile(r"(?<=\w\w)\.(?=[A-Za-z][A-Za-z0-9]{1,5}\b)")
+
 
 def to_speech(markdown: str | None, max_chars: int = 1400) -> str:
     if not markdown:
@@ -27,6 +30,7 @@ def to_speech(markdown: str | None, max_chars: int = 1400) -> str:
 
 
 def speech_chunks(text: str, max_chars: int) -> list[str]:
+    """Split text for synthesis, ending each chunk at a sentence end where one exists."""
     if not text:
         return []
     if max_chars <= 0 or len(text) <= max_chars:
@@ -37,13 +41,25 @@ def speech_chunks(text: str, max_chars: int) -> list[str]:
         if len(remaining) <= max_chars:
             chunks.append(remaining)
             break
-        chunk = remaining[:max_chars]
-        split_at = max(chunk.rfind(". "), chunk.rfind("? "), chunk.rfind("! "), chunk.rfind(" "))
-        if split_at < max_chars // 2:
-            split_at = max_chars
+        split_at = _split_point(remaining, max_chars)
         chunks.append(remaining[:split_at].strip())
         remaining = remaining[split_at:].strip()
     return chunks
+
+
+def _split_point(remaining: str, max_chars: int) -> int:
+    """After the last sentence end past the half-way mark, else at the last space, else hard."""
+    window = remaining[: max_chars + 1]
+    sentence_ends = [match.end() for match in SENTENCE_END_RE.finditer(window)]
+    if sentence_ends and sentence_ends[-1] >= max_chars // 2:
+        return sentence_ends[-1]
+    space = window[:max_chars].rfind(" ")
+    return space if space >= max_chars // 2 else max_chars
+
+
+def spoken_form(text: str) -> str:
+    """Text as the voice should say it: a dot inside a file or domain name is spoken as "dot"."""
+    return FILE_DOT_RE.sub(" dot ", text)
 
 
 def to_gist(text: str | None, gist_chars: int = 240) -> str:
