@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 
 from aloud import __version__
@@ -246,7 +247,8 @@ def cmd_attention_self_test(args: argparse.Namespace) -> int:
     registry = Registry(paths)
     synth = FakeSynth()
     player = FakePlayer()
-    daemon = Daemon(paths=paths, registry=registry, synthesizer=synth, player=player)
+    unmuted = replace(paths, muted=paths.cache_home / "self-test.muted")  # ignore the user's mute
+    daemon = Daemon(paths=unmuted, registry=registry, synthesizer=synth, player=player)
     run_id = time.time_ns()
     sid_a = f"attention-self-test-a-{run_id}"
     sid_b = f"attention-self-test-b-{run_id}"

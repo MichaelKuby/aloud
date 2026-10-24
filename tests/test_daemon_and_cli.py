@@ -71,3 +71,14 @@ def test_attention_self_test_no_audio_reports_required_summary(isolated_env, cap
     )
     session_records = list(isolated_env.sessions.glob("attention-self-test-a-*.json"))
     assert session_records
+
+
+def test_attention_self_test_passes_while_muted(isolated_env, capsys):
+    isolated_env.muted.parent.mkdir(parents=True, exist_ok=True)
+    isolated_env.muted.touch()
+
+    exit_code = main(["self-test", "--attention", "--no-audio"])
+
+    assert exit_code == 0
+    assert "attention self-test ok" in capsys.readouterr().out
+    assert isolated_env.muted.exists()
