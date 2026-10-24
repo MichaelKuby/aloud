@@ -67,6 +67,18 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser = sub.add_parser("stop", help="stop playback")
     stop_parser.set_defaults(func=lambda _args: cmd_send("stop"))
 
+    last_parser = sub.add_parser("last", help="read the most recent finished reply of any session")
+    last_parser.set_defaults(func=lambda _args: cmd_send("last", autostart=True))
+
+    mute_parser = sub.add_parser("mute", help="silence automatic speech; explicit reads still work")
+    mute_parser.add_argument("--toggle", action="store_true", help="flip between muted and not")
+    mute_parser.set_defaults(
+        func=lambda args: cmd_send("mute toggle" if args.toggle else "mute", autostart=True)
+    )
+
+    unmute_parser = sub.add_parser("unmute", help="resume automatic speech")
+    unmute_parser.set_defaults(func=lambda _args: cmd_send("unmute", autostart=True))
+
     voices_parser = sub.add_parser("voices", help="list or preview Kokoro voices")
     voices_parser.add_argument(
         "--play",
@@ -121,6 +133,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 
     failed = False
     print(f"Aloud config: voice={config.voice} speed={config.speed}")
+    print(f"muted: {'yes' if paths.muted.exists() else 'no'}")
     for name, ok, detail in checks:
         mark = "ok" if ok else "missing"
         print(f"{mark:7} {name}: {detail}")

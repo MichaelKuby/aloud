@@ -20,6 +20,7 @@ class AppPaths:
     signature: Path
     log: Path
     launch_agent: Path
+    muted: Path
 
     def ensure_runtime_dirs(self) -> None:
         for path in (self.app_home, self.cache_home, self.log_home, self.sessions, self.armed):
@@ -50,4 +51,5 @@ def default_paths(env: dict[str, str] | None = None) -> AppPaths:
         signature=cache_home.expanduser() / "last.sig",
         log=log_home.expanduser() / "daemon.log",
         launch_agent=home / "Library" / "LaunchAgents" / "io.aloud.daemon.plist",
+        muted=app_home / "muted",
     )

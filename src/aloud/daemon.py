@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,12 +103,14 @@ class Daemon:
         registry: Registry | None = None,
         synthesizer: Synthesizer | None = None,
         player: Player | None = None,
+        notifier: Callable[[str], None] | None = None,
     ):
         self.paths = paths or default_paths()
         self.config = config or load_config(self.paths)
         self.registry = registry or Registry(self.paths, self.config)
         self.synthesizer = synthesizer or KokoroSynthesizer(self.config)
         self.player = player or AfplayPlayer()
+        self.notifier = notifier or notify
         self.current_priority: int | None = None
         self._generation = 0
         self._worker: threading.Thread | None = None
@@ -130,6 +133,12 @@ class Daemon:
             self.current_priority = None
         elif verb == "forget":
             self.forget()
+        elif verb == "last":
+            self.last(arg or None)
+        elif verb == "mute":
+            self.set_muted(not self.muted if arg == "toggle" else True)
+        elif verb == "unmute":
+            self.set_muted(False)
 
     def full(self) -> None:
         self._play_text(self.registry.spoken_target().text, priority=0)
@@ -137,9 +146,33 @@ class Daemon:
     def repeat(self) -> None:
         self._play_text(self.registry.spoken_attention_target().text, priority=0)
 
+    def last(self, session_id: str | None = None) -> None:
+        """Read a session's last finished reply in full, or the most recent one of any session."""
+        session_id = session_id or self.registry.latest_session()
+        text = self.registry.text_for(session_id)
+        if text:
+            self.registry.note_spoken(session_id)
+        self._play_text(text, priority=0)
+
+    @property
+    def muted(self) -> bool:
+        return self.paths.muted.exists()
+
+    def set_muted(self, muted: bool) -> None:
+        """Silence or resume automatic speech; explicit reads keep working either way."""
+        if muted:
+            self.stop_playback()
+            self.current_priority = None
+            self.paths.muted.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.muted.touch()
+        else:
+            with suppress(OSError):
+                self.paths.muted.unlink()
+        self.notifier("Aloud muted" if muted else "Aloud unmuted")
+
     def speak(self, session_id: str) -> None:
         full_text = self.registry.text_for(session_id)
-        if not full_text:
+        if not full_text or self.muted:
             return
         priority = self.registry.priority_for(session_id)
         attention_text = self.registry.attention_for(session_id)
@@ -191,7 +224,7 @@ class Daemon:
         self.current_priority = priority
         if not text:
             if not quiet:
-                notify("No reply to read yet.")
+                self.notifier("No reply to read yet.")
             return
         chunks = speech_chunks(text, self.config.max_chars)
         outputs = [self._chunk_path(index) for index in range(len(chunks))]

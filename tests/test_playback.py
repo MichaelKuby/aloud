@@ -21,6 +21,7 @@ LONG_REPLY = (
 )
 LONG_SPEECH = "Claude aloud completed. " + LONG_REPLY
 CHUNKS = speech_chunks(LONG_SPEECH, CONFIG.max_chars)
+NOTIFICATIONS: list[str] = []
 
 
 class RecordingSynth:
@@ -96,8 +97,14 @@ def _daemon(isolated_env) -> tuple[Daemon, RecordingSynth, GatedPlayer, Registry
     synth = RecordingSynth()
     player = GatedPlayer()
     daemon = Daemon(
-        paths=isolated_env, config=CONFIG, registry=registry, synthesizer=synth, player=player
+        paths=isolated_env,
+        config=CONFIG,
+        registry=registry,
+        synthesizer=synth,
+        player=player,
+        notifier=NOTIFICATIONS.append,
     )
+    NOTIFICATIONS.clear()
     return daemon, synth, player, registry
 
 
@@ -203,3 +210,64 @@ def test_repeat_of_the_same_text_replays_from_cache(isolated_env):
 
     assert len(synth.calls) == synthesised
     assert player.played[len(CHUNKS) :] == _chunk_names(len(CHUNKS))
+
+
+def test_last_reads_the_most_recent_reply_and_moves_the_spoken_pointer(isolated_env):
+    daemon, synth, player, registry = _daemon(isolated_env)
+    _record(registry, "SID-A", "Alpha reply done.")
+    time.sleep(0.01)
+    _record(registry, "SID-B", "Beta reply done.")
+
+    daemon.handle("last")
+
+    assert synth.calls == ["Beta reply done."]
+    assert registry.spoken_target().text == "Beta reply done."
+
+    daemon.handle("last SID-A")
+
+    assert synth.calls[-1] == "Alpha reply done."
+    assert registry.spoken_target().text == "Alpha reply done."
+
+
+def test_last_with_nothing_recorded_notifies_instead_of_speaking(isolated_env):
+    daemon, synth, player, registry = _daemon(isolated_env)
+
+    daemon.handle("last")
+
+    assert synth.calls == []
+    assert NOTIFICATIONS == ["No reply to read yet."]
+
+
+def test_mute_drops_automatic_speech_but_not_explicit_reads(isolated_env):
+    daemon, synth, player, registry = _daemon(isolated_env)
+
+    daemon.handle("mute")
+
+    assert daemon.muted and isolated_env.muted.exists()
+    assert NOTIFICATIONS == ["Aloud muted"]
+    _record(registry, "SID-A", "A reply while muted.")
+    daemon.speak("SID-A")
+    assert synth.calls == []
+    daemon.handle("last")
+    assert synth.calls == ["A reply while muted."]
+
+    daemon.handle("mute toggle")
+
+    assert not daemon.muted and not isolated_env.muted.exists()
+    assert NOTIFICATIONS[-1] == "Aloud unmuted"
+    _record(registry, "SID-B", "Spoken now.")  # one chunk at 40 chars
+    player.active = False  # the explicit read has finished playing
+    daemon.speak("SID-B")
+    daemon.wait_idle()
+    assert synth.calls[-1] == "Claude aloud completed. Spoken now."
+
+
+def test_unmute_is_idempotent_and_mute_survives_a_new_daemon(isolated_env):
+    daemon, synth, player, registry = _daemon(isolated_env)
+    daemon.handle("unmute")
+    assert not daemon.muted
+    daemon.handle("mute")
+
+    fresh, _, _, _ = _daemon(isolated_env)
+
+    assert fresh.muted

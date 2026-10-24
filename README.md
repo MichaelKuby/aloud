@@ -50,6 +50,8 @@ aloud on
 ```
 
 Aloud now speaks alerts and a short gist of each completed reply in that session.
+Every session's last finished reply is kept, armed or not, so `aloud last` works
+without `aloud on`.
 
 | Command | Action |
 | --- | --- |
@@ -57,11 +59,13 @@ Aloud now speaks alerts and a short gist of each completed reply in that session
 | `aloud full` | Read the full response from the last spoken session |
 | `aloud repeat` | Repeat the last question, approval request, or alert |
 | `aloud stop` | Stop playback |
+| `aloud last` | Typed in a session: read that session's last reply. In a terminal: read the most recent reply of any session |
+| `aloud mute` / `aloud unmute` | Silence or resume automatic speech everywhere; explicit reads still work |
 | `aloud voices` | List the supported voice choices |
 | `aloud voices --play` | Preview each voice |
 
-Claude Code also installs `/aloud-on` and `/aloud-off`. Codex installs
-`/prompts:aloud-on` and `/prompts:aloud-off` after it reloads prompts.
+Claude Code also installs `/aloud-on`, `/aloud-off` and `/aloud-last`. Codex installs
+`/prompts:aloud-on`, `/prompts:aloud-off` and `/prompts:aloud-last` after it reloads prompts.
 
 ### Keyboard shortcuts
 
@@ -70,6 +74,12 @@ Claude Code also installs `/aloud-on` and `/aloud-off`. Codex installs
 | `Cmd+Ctrl+H` | Read the full response |
 | `Cmd+Ctrl+J` | Repeat the last alert |
 | `Cmd+Ctrl+.` | Stop playback |
+| `Cmd+Ctrl+L` | Read the most recent reply of any session |
+| `Cmd+Ctrl+M` | Mute or unmute automatic speech |
+
+A speaker in the menu bar shows the state (🔈 speaking, 🔇 muted) and replaces
+Hammerspoon's own icon; its menu offers mute, the last and full reply, stop, and a
+Hammerspoon config reload.
 
 ## How Aloud works
 
@@ -184,6 +194,7 @@ Aloud stores its mutable files under `~/Library`:
 | --- | --- |
 | `~/Library/Application Support/Aloud/config.json` | Voice, speed, and retention settings |
 | `~/Library/Application Support/Aloud/sessions/` | Armed-session markers and recent event text |
+| `~/Library/Application Support/Aloud/muted` | Present while automatic speech is muted |
 | `~/Library/Caches/Aloud/` | Generated WAV files and cache signatures |
 | `~/Library/Logs/Aloud/daemon.log` | Daemon output |
 | `~/Library/LaunchAgents/io.aloud.daemon.plist` | macOS background-service definition |

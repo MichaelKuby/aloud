@@ -7,8 +7,11 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
+import aloud.hooks as hooks_module
 from aloud.config import Config
-from aloud.hooks import prompt_hook, stop_hook
+from aloud.hooks import event_hook, prompt_hook, stop_hook
 from aloud.registry import Registry
 
 
@@ -60,6 +63,7 @@ def test_stop_hook_sends_speak_only_for_armed_session(isolated_env):
         signature=isolated_env.signature,
         log=isolated_env.log,
         launch_agent=isolated_env.launch_agent,
+        muted=isolated_env.muted,
     )
     isolated_env.socket.parent.mkdir(parents=True, exist_ok=True)
     received: list[str] = []
@@ -89,3 +93,68 @@ def test_stop_hook_sends_speak_only_for_armed_session(isolated_env):
     assert sid == "SID-A"
     assert received == ["speak SID-A"]
     assert json.loads((isolated_env.sessions / "SID-A.json").read_text())["text"] == "Ready."
+
+
+def _stop(session_id: str, text: str) -> dict:
+    return {
+        "source": "Claude",
+        "hook_event_name": "Stop",
+        "session_id": session_id,
+        "cwd": "/repo/aloud",
+        "last_assistant_message": text,
+    }
+
+
+def _recorder(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    sent: list[str] = []
+    monkeypatch.setattr(hooks_module, "send_command", lambda command, *a, **k: sent.append(command))
+    return sent
+
+
+def test_unarmed_sessions_keep_their_last_reply_without_speaking(isolated_env, monkeypatch):
+    sent = _recorder(monkeypatch)
+    registry = Registry(isolated_env, Config())
+
+    assert event_hook(_stop("SID-Q", "Quiet reply. Nothing spoken."), isolated_env) is None
+
+    assert registry.text_for("SID-Q") == "Quiet reply. Nothing spoken."
+    assert registry.resolve_target().text == "Quiet reply. Nothing spoken."
+    assert registry.latest_session() == "SID-Q"
+    assert sent == []
+
+
+def test_unarmed_sessions_do_not_keep_permission_requests(isolated_env, monkeypatch):
+    _recorder(monkeypatch)
+    payload = {
+        "source": "Claude",
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "session_id": "SID-P",
+        "cwd": "/repo/aloud",
+        "command": "ls",
+    }
+
+    assert event_hook(payload, isolated_env) is None
+    assert Registry(isolated_env, Config()).text_for("SID-P") == ""
+
+
+@pytest.mark.parametrize(
+    ("prompt", "command", "reason"),
+    [
+        ("aloud last", "last SID-A", "last reply"),
+        ("/aloud-last", "last SID-A", "last reply"),
+        ("aloud mute", "mute", "muted"),
+        ("aloud unmute", "unmute", "unmuted"),
+    ],
+)
+def test_prompt_hook_relays_last_mute_and_unmute(
+    isolated_env, monkeypatch, prompt, command, reason
+):
+    sent = _recorder(monkeypatch)
+
+    decision = prompt_hook({"session_id": "SID-A", "prompt": prompt}, isolated_env)
+
+    assert decision and decision["decision"] == "block"
+    assert reason in decision["reason"]
+    assert sent == [command]
+    assert not (isolated_env.armed / "SID-A").exists()

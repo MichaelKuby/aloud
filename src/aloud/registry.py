@@ -179,6 +179,13 @@ class Registry:
             return target
         return Target("", "")
 
+    def latest_session(self) -> str:
+        """The session whose reply was recorded most recently, or an empty string."""
+        try:
+            return self.paths.latest.read_text().strip()
+        except OSError:
+            return ""
+
     def armed_transcripts(self) -> list[tuple[str, str, int]]:
         if not self.paths.armed.exists():
             return []

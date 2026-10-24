@@ -6,7 +6,7 @@ import sys
 from contextlib import suppress
 from typing import Any
 
-from aloud.attention import normalize_attention_event
+from aloud.attention import COMPLETION_EVENTS, normalize_attention_event
 from aloud.paths import AppPaths, default_paths
 from aloud.registry import Registry
 from aloud.socket_client import send_command
@@ -14,6 +14,9 @@ from aloud.socket_client import send_command
 WAKE = r"(?:aloud|a loud|allowed)"
 ARM_RE = re.compile(rf"^{WAKE}\s+(on|listen|start)$")
 OFF_RE = re.compile(rf"^{WAKE}\s+(off|stop|quiet)$")
+LAST_RE = re.compile(rf"^{WAKE}\s+(last|read)$")
+MUTE_RE = re.compile(rf"^{WAKE}\s+mute$")
+UNMUTE_RE = re.compile(rf"^{WAKE}\s+unmute$")
 
 
 def normalize_prompt(prompt: str) -> str:
@@ -38,6 +41,15 @@ def prompt_hook(payload: dict[str, Any], paths: AppPaths | None = None) -> dict[
         registry.disarm(session_id)
         send_command("stop", paths)
         return {"decision": "block", "reason": "Aloud is OFF for this session."}
+    if LAST_RE.match(phrase):
+        send_command(f"last {session_id}", paths, autostart=True)
+        return {"decision": "block", "reason": "Reading this session's last reply."}
+    if MUTE_RE.match(phrase):
+        send_command("mute", paths, autostart=True)
+        return {"decision": "block", "reason": "Aloud muted. Say 'aloud unmute' to resume."}
+    if UNMUTE_RE.match(phrase):
+        send_command("unmute", paths, autostart=True)
+        return {"decision": "block", "reason": "Aloud unmuted."}
     send_command("forget", paths)
     return None
 
@@ -55,7 +67,11 @@ def event_hook(payload: dict[str, Any], paths: AppPaths | None = None) -> str | 
     paths = paths or default_paths()
     registry = Registry(paths)
     event = normalize_attention_event(payload, registry.config)
-    if not event or not registry.is_armed(event.session_id):
+    if not event:
+        return None
+    if not registry.is_armed(event.session_id):
+        if payload.get("hook_event_name") in COMPLETION_EVENTS:
+            registry.record_attention(event)  # kept for `aloud last`, never spoken
         return None
     session_id = registry.record_attention(event)
     if session_id:

@@ -29,6 +29,8 @@ ALOUD_NEEDLES = (
     "aloud forget",
 )
 
+AGENT_COMMANDS = ("aloud-on.md", "aloud-off.md", "aloud-last.md")
+
 ATTENTION_HOOK_EVENTS = (
     "PreToolUse",
     "PermissionRequest",
@@ -78,7 +80,7 @@ def install(
         reload_launch_agent(paths, runner, result)
     else:
         result.add("launchd helper written but not started")
-    install_hammerspoon(command_prefix, result, start_app=start_services)
+    install_hammerspoon(command_prefix, result, paths.muted, start_app=start_services)
     install_agent_commands(result)
     install_claude_hooks(command_prefix, result)
     install_codex_hooks(command_prefix, result)
@@ -145,13 +147,14 @@ def reload_launch_agent(paths: AppPaths, runner: Runner, result: InstallResult) 
 def install_hammerspoon(
     command_prefix: list[str],
     result: InstallResult,
+    muted_marker: Path,
     *,
     start_app: bool = True,
 ) -> None:
     init = Path.home() / ".hammerspoon" / "init.lua"
     init.parent.mkdir(parents=True, exist_ok=True)
     existing = init.read_text() if init.exists() else ""
-    block = hammerspoon_block(command_prefix)
+    block = hammerspoon_block(command_prefix, muted_marker)
     updated = replace_marked_block(
         existing,
         "-- BEGIN Aloud hotkeys",
@@ -172,19 +175,57 @@ def install_hammerspoon(
         )
 
 
-def hammerspoon_block(command_prefix: list[str]) -> str:
-    command = shlex.join(command_prefix)
-    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+def hammerspoon_block(command_prefix: list[str], muted_marker: Path) -> str:
+    """Hotkeys plus a menu-bar speaker, with a menu, that replaces Hammerspoon's own icon."""
+    command = _lua_string(shlex.join(command_prefix))
+    marker = _lua_string(str(muted_marker))
     return (
         "\n-- BEGIN Aloud hotkeys\n"
-        "-- Cmd+Ctrl+H = hear the full reply, Cmd+Ctrl+J = repeat, Cmd+Ctrl+. = stop\n"
-        f'local aloud = "{escaped}"\n'
+        "-- Cmd+Ctrl+H = hear the full reply, Cmd+Ctrl+J = repeat, Cmd+Ctrl+. = stop,\n"
+        "-- Cmd+Ctrl+L = read the last reply of any session, Cmd+Ctrl+M = mute or unmute.\n"
+        "-- The menu-bar speaker follows the daemon's mute marker and carries the menu.\n"
+        f"local aloud = {command}\n"
+        f"local aloudMuted = {marker}\n"
+        "local aloudBar = hs.menubar.new()\n"
+        "local function aloudRefresh()\n"
+        "  local muted = hs.fs.attributes(aloudMuted) ~= nil\n"
+        '  aloudBar:setTitle(muted and "🔇" or "🔈")\n'
+        '  aloudBar:setTooltip(muted and "Aloud: muted" or "Aloud: speaking")\n'
+        "  return muted\n"
+        "end\n"
+        "local function aloudToggleMute()\n"
+        '  hs.execute(aloud .. " mute --toggle")\n'
+        "  hs.timer.doAfter(0.4, function()\n"
+        '    hs.alert.show(aloudRefresh() and "Aloud muted" or "Aloud unmuted")\n'
+        "  end)\n"
+        "end\n"
+        "aloudBar:setMenu(function()\n"
+        "  local muted = hs.fs.attributes(aloudMuted) ~= nil\n"
+        "  return {\n"
+        '    { title = muted and "Unmute Aloud" or "Mute Aloud", fn = aloudToggleMute },\n'
+        '    { title = "Read last reply", fn = function() hs.execute(aloud .. " last") end },\n'
+        '    { title = "Read full reply", fn = function() hs.execute(aloud .. " full") end },\n'
+        '    { title = "Stop playback", fn = function() hs.execute(aloud .. " stop") end },\n'
+        '    { title = "-" },\n'
+        '    { title = "Reload Hammerspoon config", fn = hs.reload },\n'
+        "  }\n"
+        "end)\n"
+        "hs.menuIcon(false)\n"
         'hs.hotkey.bind({"cmd","ctrl"}, "H", function() hs.execute(aloud .. " full") end)\n'
         'hs.hotkey.bind({"cmd","ctrl"}, "J", function() hs.execute(aloud .. " repeat") end)\n'
         'hs.hotkey.bind({"cmd","ctrl"}, ".", function() hs.execute(aloud .. " stop") end)\n'
+        'hs.hotkey.bind({"cmd","ctrl"}, "L", function() hs.execute(aloud .. " last") end)\n'
+        'hs.hotkey.bind({"cmd","ctrl"}, "M", aloudToggleMute)\n'
+        "hs.timer.doEvery(5, aloudRefresh)\n"
+        "aloudRefresh()\n"
         'hs.alert.show("Aloud hotkeys loaded")\n'
         "-- END Aloud hotkeys\n"
     )
+
+
+def _lua_string(value: str) -> str:
+    """`value` as a double-quoted Lua string literal."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def remove_hammerspoon_block(result: InstallResult) -> None:
@@ -207,24 +248,21 @@ def install_agent_commands(result: InstallResult) -> None:
         if not target.parent.exists():
             continue
         target.mkdir(parents=True, exist_ok=True)
-        for name in ("aloud-on.md", "aloud-off.md"):
+        for name in AGENT_COMMANDS:
             content = files("aloud.commands").joinpath(name).read_text()
             write_text_with_backup(target / name, content, result)
         result.add(f"{message} in {target}")
 
 
 def remove_agent_commands(result: InstallResult) -> None:
-    for target in (
-        Path.home() / ".claude" / "commands" / "aloud-on.md",
-        Path.home() / ".claude" / "commands" / "aloud-off.md",
-        Path.home() / ".codex" / "prompts" / "aloud-on.md",
-        Path.home() / ".codex" / "prompts" / "aloud-off.md",
-    ):
-        try:
-            target.unlink()
-            result.add(f"removed {target}")
-        except OSError:
-            pass
+    for directory in (Path.home() / ".claude" / "commands", Path.home() / ".codex" / "prompts"):
+        for name in AGENT_COMMANDS:
+            target = directory / name
+            try:
+                target.unlink()
+                result.add(f"removed {target}")
+            except OSError:
+                pass
 
 
 def install_claude_hooks(command_prefix: list[str], result: InstallResult) -> None:

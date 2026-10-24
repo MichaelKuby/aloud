@@ -4,7 +4,7 @@ import json
 import plistlib
 import subprocess
 
-from aloud.installer import ATTENTION_HOOK_EVENTS, install
+from aloud.installer import ATTENTION_HOOK_EVENTS, install, uninstall
 
 
 def fake_runner(_args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -75,6 +75,39 @@ def test_install_is_idempotent_and_preserves_non_aloud_hooks(isolated_env):
     assert (claude / "commands" / "aloud-on.md").exists()
     assert (codex / "prompts" / "aloud-off.md").exists()
     assert 'aloud .. " repeat"' in (hammerspoon / "init.lua").read_text()
+    assert 'aloud .. " last"' in (hammerspoon / "init.lua").read_text()
+    assert 'aloud .. " mute --toggle"' in (hammerspoon / "init.lua").read_text()
+    assert "hs.menubar.new()" in (hammerspoon / "init.lua").read_text()
+    assert "hs.menuIcon(false)" in (hammerspoon / "init.lua").read_text()
+    assert "Reload Hammerspoon config" in (hammerspoon / "init.lua").read_text()
+    assert str(isolated_env.muted) in (hammerspoon / "init.lua").read_text()
+    assert (hammerspoon / "init.lua").read_text().count("-- BEGIN Aloud hotkeys") == 1
+    assert (claude / "commands" / "aloud-last.md").read_text().endswith("aloud last\n")
+    assert (codex / "prompts" / "aloud-last.md").exists()
     assert any(path.name.startswith("init.lua.bak-") for path in backups)
     assert any(path.name.startswith("aloud-on.md.bak-") for path in backups)
     assert len({path.name for path in backups}) == len(backups)
+
+
+def test_uninstall_removes_command_files_and_hotkeys_and_keeps_own_config(isolated_env):
+    user_home = isolated_env.app_home.parents[2]
+    claude = user_home / ".claude"
+    hammerspoon = user_home / ".hammerspoon"
+    claude.mkdir()
+    hammerspoon.mkdir()
+    (hammerspoon / "init.lua").write_text("-- keep my hammerspoon config\n")
+    (claude / "settings.json").write_text(json.dumps({"hooks": {}}))
+    install(
+        isolated_env,
+        runner=fake_runner,
+        command_prefix=["/tmp/python", "-m", "aloud"],
+        install_external_tools=False,
+        start_services=False,
+    )
+
+    uninstall(isolated_env, runner=fake_runner)
+
+    assert not (claude / "commands" / "aloud-last.md").exists()
+    assert not (claude / "commands" / "aloud-on.md").exists()
+    assert (hammerspoon / "init.lua").read_text() == "-- keep my hammerspoon config\n"
+    assert not isolated_env.launch_agent.exists()
