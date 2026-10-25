@@ -380,6 +380,8 @@ def load_json_file(path: Path) -> dict[str, Any]:
 
 
 def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    """Write `data` via a temp file and rename; a symlink is written through, not replaced."""
+    path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")

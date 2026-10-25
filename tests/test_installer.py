@@ -89,6 +89,30 @@ def test_install_is_idempotent_and_preserves_non_aloud_hooks(isolated_env):
     assert len({path.name for path in backups}) == len(backups)
 
 
+def test_install_writes_through_a_settings_symlink(isolated_env):
+    user_home = isolated_env.app_home.parents[2]
+    claude = user_home / ".claude"
+    claude.mkdir()
+    canonical = user_home / ".agents" / "providers" / "claude" / "settings.json"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text(json.dumps({"model": "keep", "hooks": {}}))
+    (claude / "settings.json").symlink_to(canonical)
+
+    install(
+        isolated_env,
+        runner=fake_runner,
+        command_prefix=["/tmp/python", "-m", "aloud"],
+        install_external_tools=False,
+        start_services=False,
+    )
+
+    assert (claude / "settings.json").is_symlink()
+    settings = json.loads(canonical.read_text())
+    assert settings["model"] == "keep"
+    assert "UserPromptSubmit" in settings["hooks"]
+    assert not list(canonical.parent.glob("*.tmp"))
+
+
 def test_uninstall_removes_command_files_and_hotkeys_and_keeps_own_config(isolated_env):
     user_home = isolated_env.app_home.parents[2]
     claude = user_home / ".claude"
